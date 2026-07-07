@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Cellar Book</title>
+    <!-- Home-screen web-app: makes the launched icon open fullscreen and
+         gives it the wine-glass icon. These live on the gate page because
+         that is the page iOS reads when adding to the home screen. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Cellar Book" />
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+    <link rel="icon" type="image/png" href="apple-touch-icon.png" />
+    <style>
+        html,body{margin:0;height:100%;background:#1a0f12;color:#e8dcd0;
+            font:16px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;}
+        .wrap{min-height:100%;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;}
+        .card{width:100%;max-width:340px;text-align:center;}
+        h1{font-size:22px;font-weight:600;margin:0 0 4px;}
+        .sub{font-size:14px;color:#b8a89a;margin:0 0 22px;}
+        input{width:100%;box-sizing:border-box;padding:13px 14px;font-size:16px;border-radius:10px;
+            border:1px solid #5a4148;background:#2a1a1f;color:#e8dcd0;margin-bottom:12px;outline:none;}
+        input:focus{border-color:#a05a68;}
+        button{width:100%;padding:13px;font-size:16px;font-weight:600;border:none;border-radius:10px;
+            background:#6d1f2c;color:#fff;}
+        button:active{background:#57131e;}
+        .msg{font-size:14px;min-height:20px;margin-top:12px;color:#d98a8a;}
+        .quiet{color:#b8a89a;}
+    </style>
+</head>
+<body>
+<div class="wrap"><div class="card">
+    <h1>Cellar Book</h1>
+    <p class="sub">Ed&rsquo;s wine log</p>
+    <form id="f">
+        <input id="pw" type="password" placeholder="Password" autocapitalize="none"
+               autocomplete="current-password" autocorrect="off" />
+        <button type="submit">Unlock</button>
+    </form>
+    <div class="msg" id="msg"></div>
+</div></div>
+<script>
+(function(){
+"use strict";
+/* Gate: fetches app.enc (and caches it for offline), derives one AES key
+   from the password, decrypts and boots the app. The derived key is cached
+   under KEY_KEY so the app can silently decrypt log.enc with it too —
+   one password, asked once per device. */
+var SALT_HEX="bb835b4eb9d507a4bb583a9a4523bf41", ITER=300000;
+var KEY_KEY="cb-log-key", APPCACHE_KEY="cb-app-cache";
+var msg=document.getElementById("msg"), pwEl=document.getElementById("pw");
+function say(t,quiet){msg.textContent=t||"";msg.className="msg"+(quiet?" quiet":"");}
+function hexToBytes(h){var a=new Uint8Array(h.length/2);for(var i=0;i<a.length;i++)a[i]=parseInt(h.substr(i*2,2),16);return a;}
+function bytesToHex(b){var u=new Uint8Array(b),s="";for(var i=0;i<u.length;i++)s+=("0"+u[i].toString(16)).slice(-2);return s;}
+function b64ToBytes(s){var bin=atob(s),a=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)a[i]=bin.charCodeAt(i);return a;}
+function lsGet(k){try{var v=localStorage.getItem(k);return v==null?null:JSON.parse(v);}catch(e){return null;}}
+function lsSet(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}
+async function deriveBits(pw){
+    var km=await crypto.subtle.importKey("raw",new TextEncoder().encode(pw),"PBKDF2",false,["deriveBits"]);
+    return await crypto.subtle.deriveBits({name:"PBKDF2",salt:hexToBytes(SALT_HEX),iterations:ITER,hash:"SHA-256"},km,256);
+}
+function importKey(bits){return crypto.subtle.importKey("raw",bits,"AES-GCM",false,["decrypt"]);}
+async function decryptBlob(blob,key){
+    var pt=await crypto.subtle.decrypt({name:"AES-GCM",iv:hexToBytes(blob.iv)},key,b64ToBytes(blob.ct));
+    return new TextDecoder().decode(pt);
+}
+var appBlob=null;
+async function getAppBlob(){
+    if(appBlob)return appBlob;
+    try{
+        var r=await fetch("app.enc?v="+Date.now(),{cache:"no-store"});
+        if(r.ok){appBlob=await r.json();lsSet(APPCACHE_KEY,appBlob);return appBlob;}
+    }catch(e){}
+    appBlob=lsGet(APPCACHE_KEY);
+    if(appBlob)say("Offline \u2014 using the saved app.",true);
+    return appBlob;
+}
+function boot(html){
+    document.open();document.write(html);document.close();
+}
+async function tryKeyHex(keyHex){
+    var blob=await getAppBlob();
+    if(!blob){say("Can't reach the app and no offline copy yet \u2014 check your connection.");return false;}
+    try{
+        var html=await decryptBlob(blob,await importKey(hexToBytes(keyHex)));
+        boot(html);return true;
+    }catch(e){return false;}
+}
+document.getElementById("f").addEventListener("submit",async function(ev){
+    ev.preventDefault();
+    var pw=pwEl.value;
+    if(!pw)return;
+    say("Unlocking\u2026",true);
+    try{
+        var bits=await deriveBits(pw);
+        var hex=bytesToHex(bits);
+        if(await tryKeyHex(hex)){lsSet(KEY_KEY,hex);return;}
+        say("Wrong password \u2014 try again.");
+    }catch(e){say("Something went wrong \u2014 try again.");}
+});
+(async function auto(){
+    var cached=lsGet(KEY_KEY);
+    if(typeof cached==="string"&&cached.length===64){
+        say("Unlocking\u2026",true);
+        if(await tryKeyHex(cached))return;
+        say("",true);
+    }
+    setTimeout(function(){try{pwEl.focus();}catch(e){}},100);
+})();
+})();
+</script>
+</body>
+</html>
